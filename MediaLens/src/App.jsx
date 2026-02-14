@@ -657,7 +657,7 @@ export default function App() {
                       onClick={e => { e.stopPropagation(); deleteArticle(id); }}
                       style={{ position: "absolute", top: 5, right: 5, width: 17, height: 17, borderRadius: 4, background: "transparent", border: "none", color: "var(--text3)", cursor: "pointer", fontSize: 9, display: "flex", alignItems: "center", justifyContent: "center" }}
                     >✕</button>
-                    <div style={{ fontFamily: "'JetBrains Mono',monospace", fontSize: "0.48rem", letterSpacing: "0.08em", color: "var(--accent)", marginBottom: 4, display: "flex", justifyContent: "space-between" }}>
+                    <div style={{ fontFamily: "'JetBrains Mono',monospace", fontSize: "0.48rem", letterSpacing: "0.08em", color: "var(--accent)", marginBottom: 4, display: "flex", justifyContent: "space-between", marginRight: "12px" }}>
                       <span>{a.tag}</span>
                       <span style={{ color: "var(--text3)" }}>{a.outlet}</span>
                     </div>
