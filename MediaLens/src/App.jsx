@@ -52,6 +52,9 @@ const GlobalStyles = () => {
 // ─── CONSTANTS ────────────────────────────────────────────────────────────────
 const HF_MODEL = "https://api-inference.huggingface.co/models/d4data/bias-detection-model";
 const CORS_PROXY = "https://api.allorigins.win/get?url=";
+const CORS_PROXY_RAW = "https://api.allorigins.win/raw?url=";
+const CORS_PROXY_FALLBACK = "https://api.codetabs.com/v1/proxy/?quest=";
+const FETCH_TIMEOUT_MS = 12000;
 const STORAGE_KEY = "medialens_v2";
 const SETTINGS_KEY = "medialens_settings_v2";
 
@@ -274,6 +277,60 @@ function extractSentences(html) {
   return { title, paragraphs, sentences: sentences.slice(0, 14) };
 }
 
+async function fetchWithTimeout(url, options = {}, timeoutMs = FETCH_TIMEOUT_MS) {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    return await fetch(url, { ...options, signal: controller.signal });
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+async function fetchArticleHtml(url) {
+  const encoded = encodeURIComponent(url);
+  const attempts = [
+    {
+      name: "AllOrigins JSON",
+      run: async () => {
+        const res = await fetchWithTimeout(CORS_PROXY + encoded);
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        const json = await res.json();
+        return json.contents || "";
+      },
+    },
+    {
+      name: "AllOrigins Raw",
+      run: async () => {
+        const res = await fetchWithTimeout(CORS_PROXY_RAW + encoded);
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        return await res.text();
+      },
+    },
+    {
+      name: "CodeTabs Proxy",
+      run: async () => {
+        const res = await fetchWithTimeout(CORS_PROXY_FALLBACK + encoded);
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        return await res.text();
+      },
+    },
+  ];
+
+  let lastError = null;
+  for (const attempt of attempts) {
+    try {
+      const html = await attempt.run();
+      if (typeof html === "string" && html.trim().length > 0) return html;
+      throw new Error("Empty response");
+    } catch (err) {
+      lastError = `${attempt.name}: ${err.message}`;
+    }
+  }
+
+  throw new Error(`Could not fetch article content (${lastError || "unknown error"})`);
+}
+
 // ─── SUB-COMPONENTS ───────────────────────────────────────────────────────────
 
 function BiasGauge({ score }) {
@@ -481,11 +538,7 @@ export default function App() {
     setView("analysis");
 
     try {
-      const proxyUrl = CORS_PROXY + encodeURIComponent(url);
-      const res = await fetch(proxyUrl);
-      if (!res.ok) throw new Error("Could not fetch article. Try a different URL.");
-      const json = await res.json();
-      const html = json.contents || "";
+      const html = await fetchArticleHtml(url);
 
       const { title, sentences } = extractSentences(html);
       if (sentences.length === 0) throw new Error("Could not extract text from this page.");
