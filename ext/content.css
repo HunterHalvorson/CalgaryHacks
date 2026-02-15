@@ -1,0 +1,22 @@
+/* content.css — ClarityLens in-page styles */
+
+/* 
+ * Highlight: warm amber — visible on both light and dark pages.
+ * !important overrides any page-level <mark> styles.
+ * Always visible regardless of browser selection state.
+ */
+
+mark.cl-highlight {
+  background-color: rgba(250, 204, 21, 0.25) !important;
+  border-bottom: 2px solid rgba(250, 204, 21, 0.7) !important;
+  color: inherit !important;
+  cursor: pointer !important;
+  transition: background-color 0.15s ease !important;
+  border-radius: 2px !important;
+  padding: 1px 2px !important;
+  -webkit-text-fill-color: inherit !important;
+}
+
+mark.cl-highlight:hover {
+  background-color: rgba(250, 204, 21, 0.4) !important;
+}

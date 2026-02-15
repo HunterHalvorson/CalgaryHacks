@@ -1,0 +1,57 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>ClarityLens Settings</title>
+  <link rel="stylesheet" href="popup.css">
+</head>
+<body>
+  <div id="app">
+    <header>
+      <div class="logo-row">
+        <svg width="24" height="24" viewBox="0 0 28 28" fill="none">
+          <circle cx="14" cy="14" r="12" stroke="currentColor" stroke-width="1.5"/>
+          <circle cx="14" cy="14" r="7" stroke="currentColor" stroke-width="1.5"/>
+          <circle cx="14" cy="14" r="2.5" fill="currentColor"/>
+          <line x1="14" y1="0" x2="14" y2="5" stroke="currentColor" stroke-width="1"/>
+          <line x1="14" y1="23" x2="14" y2="28" stroke="currentColor" stroke-width="1"/>
+          <line x1="0" y1="14" x2="5" y2="14" stroke="currentColor" stroke-width="1"/>
+          <line x1="23" y1="14" x2="28" y2="14" stroke="currentColor" stroke-width="1"/>
+        </svg>
+        <div>
+          <h1>ClarityLens</h1>
+          <p class="sub">Critical Thinking Toolkit</p>
+        </div>
+      </div>
+    </header>
+
+    <section class="section">
+      <h2>How to Use</h2>
+      <p class="help-text">Select any text on a webpage and click the <strong>Analyze</strong> button that appears. Results show in a side panel. Analyzed text stays highlighted — click any highlight to revisit its analysis.</p>
+    </section>
+
+    <section class="section">
+      <h2>OpenAI API Key <span class="optional">(optional)</span></h2>
+      <p class="help-text">Adds AI-enhanced analysis (bias, fallacies, manipulation detection) on top of the algorithmic engine. Uses gpt-4o-mini.</p>
+      <div class="input-row">
+        <input type="password" id="api-key" placeholder="sk-..." autocomplete="off" spellcheck="false">
+        <button id="save-key" class="btn">Save</button>
+      </div>
+      <div id="key-status" class="status"></div>
+    </section>
+
+    <section class="section">
+      <h2>Highlights on This Page</h2>
+      <p id="highlight-count" class="help-text">Checking…</p>
+      <button id="clear-highlights" class="btn btn-outline">Clear All Highlights</button>
+    </section>
+
+    <section class="section">
+      <h2>About</h2>
+      <p class="help-text">v2.0 — All core analysis is algorithmic (no AI required). Sentiment uses a scored lexicon with negation handling. Bias, fallacy, and claim detection use linguistic pattern matching. Readability uses published formulas. The AI layer is optional and supplements — never replaces — the algorithmic engine.</p>
+    </section>
+  </div>
+
+  <script src="popup.js"></script>
+</body>
+</html>
