@@ -1,11 +1,17 @@
 /**
- * content.js — ClarityLens content script
- * 
+ * content.js — ClarityLens content script (v2.1)
+ *
  * Selection-driven workflow:
  *   1. User selects text → floating "Analyze" button appears
  *   2. Click → analysis runs → results panel slides in → text highlighted
  *   3. Highlight + analysis persisted to chrome.storage.local
  *   4. On page revisit, highlights restored; clicking them reopens analysis
+ *
+ * Changes from v2.0:
+ *   - Fixed AI tab rendering to match updated openai-enhancer schema
+ *   - New AI sub-sections: rhetorical strategies, missing context (detailed),
+ *     claim red flags, purpose detection, credibility reasoning, key takeaway
+ *   - Proper field mapping (evidenceNeeded, redFlags, etc.)
  */
 
 (() => {
@@ -73,16 +79,13 @@
   function showFloatingButton(viewportX, viewportY) {
     if (!floatingBtn) createFloatingButton();
 
-    // Position using fixed viewport coordinates — stays put on screen
-    const btnWidth = 110; // approximate
+    const btnWidth = 110;
     let left = viewportX - btnWidth / 2;
     let top = viewportY + 10;
 
-    // Clamp to viewport edges
     left = Math.max(8, Math.min(left, window.innerWidth - btnWidth - 8));
     top = Math.max(8, Math.min(top, window.innerHeight - 40));
 
-    // If selection is near bottom, show above instead
     if (top > window.innerHeight - 60) {
       top = viewportY - 42;
     }
@@ -112,7 +115,6 @@
   let lastSelectionText = "";
 
   document.addEventListener("mouseup", (e) => {
-    // Don't trigger on our own UI
     if (e.target.closest?.("#cl-float-btn") || e.target.closest?.("#cl-panel-host")) return;
 
     clearTimeout(selectionTimeout);
@@ -124,7 +126,6 @@
         lastSelectionText = text;
         const range = sel.getRangeAt(0);
         const rect = range.getBoundingClientRect();
-        // Pass viewport-relative coords (getBoundingClientRect already returns these)
         showFloatingButton(rect.left + rect.width / 2, rect.bottom);
       } else {
         hideFloatingButton();
@@ -132,10 +133,8 @@
     }, 200);
   });
 
-  // Hide button only when clicking on page (not our UI) AND no active selection
   document.addEventListener("mousedown", (e) => {
     if (e.target.closest?.("#cl-float-btn") || e.target.closest?.("#cl-panel-host")) return;
-    // Small delay — let mouseup/selection events fire first
     setTimeout(() => {
       const sel = window.getSelection();
       if (!sel || sel.toString().trim().length < MIN_SELECTION_LENGTH) {
@@ -172,7 +171,7 @@
     // Highlight the selected text
     const highlightId = "cl-hl-" + Date.now() + "-" + (++highlightCounter);
     try {
-      highlightRange(range, highlightId);
+      await highlightRange(range, highlightId);
     } catch (err) {
       console.warn("ClarityLens: couldn't highlight range:", err.message);
     }
@@ -182,7 +181,6 @@
     stored.push({
       id: highlightId,
       text: text.slice(0, 2000),
-      // Save surrounding context for re-finding on page reload
       contextBefore: getContextAround(range, "before"),
       contextAfter: getContextAround(range, "after"),
       analysis: analysis,
@@ -210,29 +208,146 @@
   // HIGHLIGHT MANAGEMENT
   // ═══════════════════════════════════════════
 
-  function highlightRange(range, id) {
-    // Only wrap text nodes to avoid breaking DOM structure
-    const frag = range.cloneContents();
-    const textLen = frag.textContent.length;
-    if (textLen === 0) return;
-
-    const mark = document.createElement("mark");
-    mark.className = "cl-highlight";
-    mark.dataset.clId = id;
-    // No inline styles — all styling via content.css .cl-highlight class
-
+  async function highlightRange(range, id) {
     try {
-      range.surroundContents(mark);
-    } catch {
-      // If surroundContents fails (spans multiple elements), wrap differently
-      const extracted = range.extractContents();
-      mark.appendChild(extracted);
-      range.insertNode(mark);
+      if (range.startContainer !== range.endContainer) {
+        await highlightMultiNodeRange(range, id);
+        return;
+      }
+
+      if (range.startContainer.nodeType === Node.TEXT_NODE) {
+        const textNode = range.startContainer;
+        const text = textNode.textContent;
+        const start = range.startOffset;
+        const end = range.endOffset;
+
+        if (start >= end) return;
+
+        const parent = textNode.parentNode;
+
+        const before = document.createTextNode(text.substring(0, start));
+        const selectedText = text.substring(start, end);
+        const after = document.createTextNode(text.substring(end));
+
+        const mark = document.createElement("mark");
+        mark.className = "cl-highlight";
+        mark.dataset.clId = id;
+        mark.textContent = selectedText;
+
+        parent.insertBefore(before, textNode);
+        parent.insertBefore(mark, textNode);
+        parent.insertBefore(after, textNode);
+        parent.removeChild(textNode);
+
+        addClickListenerToMark(mark, id);
+      } else {
+        const walker = document.createTreeWalker(
+          range.startContainer,
+          NodeFilter.SHOW_TEXT,
+          {
+            acceptNode: function(node) {
+              return range.intersectsNode(node) ?
+                NodeFilter.FILTER_ACCEPT : NodeFilter.FILTER_REJECT;
+            }
+          }
+        );
+
+        const textNodes = [];
+        while (walker.nextNode()) textNodes.push(walker.currentNode);
+
+        if (textNodes.length === 0) return;
+
+        if (textNodes.length === 1) {
+          const node = textNodes[0];
+          const newRange = range.cloneRange();
+          newRange.setStart(node, Math.max(0, range.startOffset));
+          newRange.setEnd(node, Math.min(node.length, range.endOffset));
+          await highlightRange(newRange, id);
+          return;
+        }
+
+        for (let i = 0; i < textNodes.length; i++) {
+          const node = textNodes[i];
+          const nodeRange = document.createRange();
+          nodeRange.selectNode(node);
+
+          if (nodeRange.compareBoundaryPoints(Range.START_TO_START, range) < 0) {
+            nodeRange.setStart(node, 0);
+          } else {
+            nodeRange.setStart(node, range.startOffset);
+          }
+
+          if (nodeRange.compareBoundaryPoints(Range.END_TO_END, range) > 0) {
+            nodeRange.setEnd(node, node.length);
+          } else {
+            nodeRange.setEnd(node, range.endOffset);
+          }
+
+          if (nodeRange.toString().trim().length > 0) {
+            await highlightRange(nodeRange, id);
+          }
+        }
+      }
+
+      window.getSelection().removeAllRanges();
+
+    } catch (err) {
+      console.warn("ClarityLens highlight error:", err);
+      try {
+        const mark = document.createElement("mark");
+        mark.className = "cl-highlight";
+        mark.dataset.clId = id;
+        const extracted = range.extractContents();
+        mark.appendChild(extracted);
+        range.insertNode(mark);
+        addClickListenerToMark(mark, id);
+      } catch (fallbackErr) {
+        console.warn("ClarityLens fallback highlight failed:", fallbackErr);
+      }
     }
+  }
 
-    // Clear the browser selection so the highlight color is visible immediately
-    window.getSelection().removeAllRanges();
+  async function highlightMultiNodeRange(range, id) {
+    const startContainer = range.startContainer;
+    const endContainer = range.endContainer;
+    const startOffset = range.startOffset;
+    const endOffset = range.endOffset;
 
+    const walker = document.createTreeWalker(
+      range.commonAncestorContainer,
+      NodeFilter.SHOW_TEXT,
+      {
+        acceptNode: function(node) {
+          return range.intersectsNode(node) ?
+            NodeFilter.FILTER_ACCEPT : NodeFilter.FILTER_REJECT;
+        }
+      }
+    );
+
+    const textNodes = [];
+    while (walker.nextNode()) textNodes.push(walker.currentNode);
+
+    for (let i = 0; i < textNodes.length; i++) {
+      const node = textNodes[i];
+      const nodeRange = document.createRange();
+
+      if (node === startContainer) {
+        nodeRange.setStart(node, startOffset);
+        nodeRange.setEnd(node, node.length);
+      } else if (node === endContainer) {
+        nodeRange.setStart(node, 0);
+        nodeRange.setEnd(node, endOffset);
+      } else {
+        nodeRange.selectNodeContents(node);
+      }
+
+      if (nodeRange.toString().trim().length > 0) {
+        await highlightRange(nodeRange, id);
+      }
+    }
+  }
+
+  function addClickListenerToMark(mark, id) {
     mark.addEventListener("click", async (e) => {
       e.stopPropagation();
       const stored = await loadHighlights();
@@ -244,9 +359,6 @@
     });
   }
 
-  /**
-   * Restore highlights on page load from storage
-   */
   async function restoreHighlights() {
     const stored = await loadHighlights();
     if (!stored || stored.length === 0) return;
@@ -256,17 +368,15 @@
     const textNodes = [];
     while (walker.nextNode()) textNodes.push(walker.currentNode);
 
-    stored.forEach(entry => {
-      if (!entry.text || entry.text.length < 2) return;
+    for (const entry of stored) {
+      if (!entry.text || entry.text.length < 2) continue;
 
-      // Find the text in the DOM
-      const searchStr = entry.text.slice(0, 200); // search prefix
+      const searchStr = entry.text.slice(0, 200);
 
       for (const node of textNodes) {
         const idx = node.textContent.indexOf(searchStr);
         if (idx === -1) continue;
 
-        // Verify context match
         if (entry.contextBefore) {
           const before = node.textContent.slice(Math.max(0, idx - 60), idx);
           if (!before.includes(entry.contextBefore.slice(-20))) continue;
@@ -277,11 +387,11 @@
           range.setStart(node, idx);
           range.setEnd(node, Math.min(node.textContent.length, idx + entry.text.length));
 
-          highlightRange(range, entry.id);
-          break; // Only highlight first match
+          await highlightRange(range, entry.id);
+          break;
         } catch { /* skip */ }
       }
-    });
+    }
   }
 
   // ═══════════════════════════════════════════
@@ -310,18 +420,15 @@
       panel.innerHTML = renderAnalysis(analysis, highlightId);
     }
 
-    // Slide in
     requestAnimationFrame(() => {
       panelHost.style.right = "0px";
     });
 
-    // Close button
     const closeBtn = panelShadow.getElementById("cl-close");
     if (closeBtn) {
       closeBtn.addEventListener("click", hidePanel);
     }
 
-    // Tab switching
     panelShadow.querySelectorAll(".cl-tab").forEach(tab => {
       tab.addEventListener("click", () => {
         panelShadow.querySelectorAll(".cl-tab").forEach(t => t.classList.remove("active"));
@@ -332,7 +439,6 @@
       });
     });
 
-    // Delete highlight button
     const delBtn = panelShadow.getElementById("cl-del-hl");
     if (delBtn && highlightId) {
       delBtn.addEventListener("click", async () => {
@@ -347,15 +453,13 @@
   }
 
   async function removeHighlight(id) {
-    // Remove from DOM
-    const mark = document.querySelector(`mark[data-cl-id="${id}"]`);
-    if (mark) {
+    const marks = document.querySelectorAll(`mark[data-cl-id="${id}"]`);
+    marks.forEach(mark => {
       const parent = mark.parentNode;
       while (mark.firstChild) parent.insertBefore(mark.firstChild, mark);
       parent.removeChild(mark);
       parent.normalize();
-    }
-    // Remove from storage
+    });
     const stored = await loadHighlights();
     await saveHighlights(stored.filter(h => h.id !== id));
   }
@@ -397,7 +501,6 @@
     if (data.depthNote) panels += `<div class="cl-note">${esc(data.depthNote)}</div>`;
     if (ai) panels += `<div class="cl-ai-badge">AI Enhanced</div>`;
 
-    // Metric rows
     panels += `<div class="cl-metrics">`;
     panels += metricRow("Words", data.wordCount, "");
     if (r.sentiment) panels += metricRow("Tone", r.sentiment.toneLabel, scoreColor(r.sentiment.objectivity));
@@ -406,9 +509,12 @@
     if (r.source) panels += metricRow("Source", r.source.credibilityLabel, scoreColor(r.source.score));
     if (r.readability) panels += metricRow("Reading Level", r.readability.levelLabel, "");
     if (r.claims) panels += metricRow("Content Type", r.claims.contentType, "");
+    if (ai && ai.purpose) panels += metricRow("AI: Purpose", capitalize(ai.purpose), "#60a5fa");
     panels += `</div>`;
 
-    if (ai && ai.overallAssessment) {
+    if (ai && ai.keyTakeaway) {
+      panels += `<div class="cl-card"><div class="cl-card-title">Key Takeaway</div><p class="cl-card-text">${esc(ai.keyTakeaway)}</p></div>`;
+    } else if (ai && ai.overallAssessment) {
       panels += `<div class="cl-card"><div class="cl-card-title">AI Assessment</div><p class="cl-card-text">${esc(ai.overallAssessment)}</p></div>`;
     }
 
@@ -466,7 +572,22 @@
       if (b.weaselWords.length) {
         panels += tagCloud("Weasel Words", b.weaselWords.map(w => w.phrase), "#fb923c");
       }
-      if (!b.totalLoadedCount && !b.framing.length && !b.weaselWords.length) {
+
+      // AI bias analysis inlined
+      if (ai && ai.biasAnalysis && ai.biasAnalysis.severity !== "none") {
+        panels += `<div class="cl-card"><div class="cl-card-title">AI Bias Assessment</div>`;
+        panels += `<div class="cl-metrics">`;
+        panels += metricRow("Direction", capitalize(ai.biasAnalysis.direction), "#60a5fa");
+        panels += metricRow("Severity", capitalize(ai.biasAnalysis.severity), ai.biasAnalysis.severity === "strong" ? "#f87171" : ai.biasAnalysis.severity === "moderate" ? "#facc15" : "#999");
+        panels += `</div>`;
+        panels += `<p class="cl-card-text">${esc(ai.biasAnalysis.explanation)}</p>`;
+        if (ai.biasAnalysis.framingTechniques && ai.biasAnalysis.framingTechniques.length) {
+          panels += `<div class="cl-tags" style="margin-top:6px">${ai.biasAnalysis.framingTechniques.map(t => `<span class="cl-tag" style="border-color:#60a5fa40">${esc(t)}</span>`).join("")}</div>`;
+        }
+        panels += `</div>`;
+      }
+
+      if (!b.totalLoadedCount && !b.framing.length && !b.weaselWords.length && !(ai && ai.biasAnalysis && ai.biasAnalysis.severity !== "none")) {
         panels += `<div class="cl-empty-msg">No significant bias markers detected.</div>`;
       }
       panels += `</div>`;
@@ -495,11 +616,21 @@
         panels += `<div class="cl-empty-msg">No logical fallacy patterns detected.</div>`;
       }
 
-      // AI fallacies
+      // AI fallacies — with confidence scores
       if (ai && ai.fallacies && ai.fallacies.length) {
         panels += `<div class="cl-card"><div class="cl-card-title">AI-Detected Fallacies</div>`;
-        ai.fallacies.forEach(f => {
-          panels += `<div class="cl-finding"><strong>${esc(f.name)}</strong><p class="cl-card-text">${esc(f.explanation)}</p></div>`;
+        ai.fallacies.forEach(fl => {
+          const sevColor = fl.severity === "high" ? "#f87171" : fl.severity === "medium" ? "#facc15" : "#60a5fa";
+          const confPct = Math.round((fl.confidence || 0.5) * 100);
+          panels += `<div class="cl-finding">
+            <div style="display:flex;align-items:center;gap:6px;margin-bottom:3px">
+              <span style="width:6px;height:6px;border-radius:50%;background:${sevColor};display:inline-block"></span>
+              <strong>${esc(fl.name)}</strong>
+              <span class="cl-count">${confPct}% conf.</span>
+            </div>
+            ${fl.quote ? `<div class="cl-examples">"${esc(fl.quote)}"</div>` : ""}
+            <p class="cl-card-text" style="margin-top:4px">${esc(fl.explanation)}</p>
+          </div>`;
         });
         panels += `</div>`;
       }
@@ -526,10 +657,36 @@
       panels += `<div class="cl-metrics">${metricRow("Content Type", c.contentType, "")}${metricRow("Classified", c.totalClassified + " / " + c.totalSentences, "")}</div>`;
 
       if (c.classifications.length) {
-        panels += `<div class="cl-card"><div class="cl-card-title">Notable Sentences</div>`;
+        panels += `<div class="cl-card"><div class="cl-card-title">Algorithmic Classification</div>`;
         c.classifications.slice(0, 12).forEach(item => {
           const color = colors[item.classification] || "#999";
           panels += `<div class="cl-claim"><p class="cl-card-text">${esc(item.text)}</p><span class="cl-badge" style="background:${color}20;color:${color}">${labels[item.classification] || item.classification}</span> <span class="cl-count">${Math.round(item.confidence * 100)}%</span></div>`;
+        });
+        panels += `</div>`;
+      }
+
+      // AI claim assessment — detailed view
+      if (ai && ai.claimAssessment && ai.claimAssessment.length) {
+        const aiClaimColors = {
+          verifiable_fact: "#4ade80", opinion: "#fb923c", value_judgment: "#c084fc",
+          prediction: "#60a5fa", unsupported_claim: "#f87171", well_supported_claim: "#4ade80",
+          misleading_claim: "#ef4444", definitional_claim: "#999"
+        };
+        panels += `<div class="cl-card"><div class="cl-card-title">AI Claim Assessment</div>`;
+        ai.claimAssessment.forEach(claim => {
+          const typeColor = aiClaimColors[claim.type] || "#999";
+          const typeLabel = (claim.type || "").replace(/_/g, " ");
+          const confPct = Math.round((claim.confidence || 0.5) * 100);
+          panels += `<div class="cl-claim">
+            <p class="cl-card-text">${esc(claim.claim)}</p>
+            <div style="display:flex;align-items:center;gap:6px;margin-top:4px;flex-wrap:wrap">
+              <span class="cl-badge" style="background:${typeColor}20;color:${typeColor}">${esc(typeLabel)}</span>
+              <span class="cl-count">${confPct}% conf.</span>
+            </div>
+            ${claim.reasoning ? `<p class="cl-card-text" style="margin-top:4px;font-size:11px;color:#999">${esc(claim.reasoning)}</p>` : ""}
+            ${claim.evidenceNeeded ? `<p class="cl-card-text" style="margin-top:2px;font-size:11px;color:#888"><em>To verify:</em> ${esc(claim.evidenceNeeded)}</p>` : ""}
+            ${claim.redFlags && claim.redFlags.length ? `<div class="cl-tags" style="margin-top:4px">${claim.redFlags.map(f => `<span class="cl-tag" style="border-color:#f8717140;color:#f87171">${esc(f)}</span>`).join("")}</div>` : ""}
+          </div>`;
         });
         panels += `</div>`;
       }
@@ -570,7 +727,7 @@
       if (ref.questions.length) {
         ref.questions.forEach(q => { panels += `<div class="cl-question"><span class="cl-q-mark">?</span>${esc(q)}</div>`; });
       }
-      if (ai && ai.suggestedQuestions) {
+      if (ai && ai.suggestedQuestions && ai.suggestedQuestions.length) {
         panels += `<div class="cl-card"><div class="cl-card-title">AI-Generated Questions</div>`;
         ai.suggestedQuestions.forEach(q => { panels += `<div class="cl-question"><span class="cl-q-mark">AI</span>${esc(q)}</div>`; });
         panels += `</div>`;
@@ -578,27 +735,148 @@
       panels += `</div>`;
     }
 
-    // --- AI TAB ---
+    // --- AI TAB (comprehensive) ---
     if (ai) {
       panels += `<div class="cl-tab-panel" id="cl-tp-ai">`;
-      panels += `<div class="cl-card"><div class="cl-card-title">AI Credibility Score</div><div class="cl-score-ring">${ai.credibilityScore}<span class="cl-score-label">/100</span></div></div>`;
-      if (ai.overallAssessment) panels += `<div class="cl-card"><div class="cl-card-title">Overall</div><p class="cl-card-text">${esc(ai.overallAssessment)}</p></div>`;
-      if (ai.biasAnalysis) panels += `<div class="cl-card"><div class="cl-card-title">Bias: ${esc(ai.biasAnalysis.severity)} (${esc(ai.biasAnalysis.direction)})</div><p class="cl-card-text">${esc(ai.biasAnalysis.explanation)}</p></div>`;
-      if (ai.missingContext) panels += `<div class="cl-card"><div class="cl-card-title">Missing Context</div><p class="cl-card-text">${esc(ai.missingContext)}</p></div>`;
-      if (ai.manipulationTechniques && ai.manipulationTechniques.length) {
-        panels += `<div class="cl-card"><div class="cl-card-title">Manipulation Techniques</div>`;
-        ai.manipulationTechniques.forEach(t => { panels += `<div class="cl-finding"><strong>${esc(t.technique)}</strong><p class="cl-card-text">${esc(t.explanation)}</p></div>`; });
+
+      // Credibility score with reasoning
+      panels += `<div class="cl-card"><div class="cl-card-title">AI Credibility Score</div><div class="cl-score-ring" style="color:${scoreColor(ai.credibilityScore)}">${ai.credibilityScore}<span class="cl-score-label">/100</span></div>`;
+      if (ai.credibilityReasoning) {
+        panels += `<p class="cl-card-text" style="margin-top:8px">${esc(ai.credibilityReasoning)}</p>`;
+      }
+      panels += `</div>`;
+
+      // Overall assessment
+      if (ai.overallAssessment) {
+        panels += `<div class="cl-card"><div class="cl-card-title">Overall Assessment</div><p class="cl-card-text">${esc(ai.overallAssessment)}</p></div>`;
+      }
+
+      // Purpose
+      if (ai.purpose) {
+        const purposeConf = ai.purposeConfidence ? Math.round(ai.purposeConfidence * 100) : null;
+        panels += `<div class="cl-card"><div class="cl-card-title">Detected Purpose</div>`;
+        panels += `<div class="cl-metrics">`;
+        panels += metricRow("Purpose", capitalize(ai.purpose), "#60a5fa");
+        if (purposeConf) panels += metricRow("Confidence", purposeConf + "%", "");
+        panels += `</div></div>`;
+      }
+
+      // Bias analysis
+      if (ai.biasAnalysis) {
+        const ba = ai.biasAnalysis;
+        panels += `<div class="cl-card"><div class="cl-card-title">Bias Analysis</div>`;
+        panels += `<div class="cl-metrics">`;
+        panels += metricRow("Direction", capitalize(ba.direction), "");
+        panels += metricRow("Severity", capitalize(ba.severity), ba.severity === "strong" ? "#f87171" : ba.severity === "moderate" ? "#facc15" : "#4ade80");
+        panels += `</div>`;
+        panels += `<p class="cl-card-text">${esc(ba.explanation)}</p>`;
+        if (ba.framingTechniques && ba.framingTechniques.length) {
+          panels += `<div class="cl-tags" style="margin-top:6px">${ba.framingTechniques.map(t => `<span class="cl-tag" style="border-color:#60a5fa40">${esc(t)}</span>`).join("")}</div>`;
+        }
         panels += `</div>`;
       }
-      if (ai.claimAssessment && ai.claimAssessment.length) {
-        panels += `<div class="cl-card"><div class="cl-card-title">Claim Assessment</div>`;
-        ai.claimAssessment.forEach(c => {
-          const typeColor = c.type === "opinion" ? "#fb923c" : c.type === "unsupported_claim" ? "#f87171" : c.type === "well_supported" ? "#4ade80" : "#999";
-          panels += `<div class="cl-claim"><p class="cl-card-text">${esc(c.claim)}</p><span class="cl-badge" style="background:${typeColor}20;color:${typeColor}">${esc(c.type.replace(/_/g, " "))}</span><p class="cl-card-text" style="margin-top:4px;font-size:11px">${esc(c.concern)}</p></div>`;
+
+      // Fallacies
+      if (ai.fallacies && ai.fallacies.length) {
+        panels += `<div class="cl-card"><div class="cl-card-title">Detected Fallacies</div>`;
+        ai.fallacies.forEach(fl => {
+          const sevColor = fl.severity === "high" ? "#f87171" : fl.severity === "medium" ? "#facc15" : "#60a5fa";
+          const confPct = Math.round((fl.confidence || 0.5) * 100);
+          panels += `<div class="cl-finding">
+            <div style="display:flex;align-items:center;gap:6px;margin-bottom:3px">
+              <span style="width:6px;height:6px;border-radius:50%;background:${sevColor};display:inline-block"></span>
+              <strong>${esc(fl.name)}</strong>
+              <span class="cl-count">${confPct}%</span>
+            </div>
+            ${fl.quote ? `<div class="cl-examples">"${esc(fl.quote)}"</div>` : ""}
+            <p class="cl-card-text" style="margin-top:4px">${esc(fl.explanation)}</p>
+          </div>`;
         });
         panels += `</div>`;
       }
-      panels += `</div>`;
+
+      // Manipulation techniques
+      if (ai.manipulationTechniques && ai.manipulationTechniques.length) {
+        panels += `<div class="cl-card"><div class="cl-card-title">Manipulation Techniques</div>`;
+        ai.manipulationTechniques.forEach(t => {
+          panels += `<div class="cl-finding">
+            <strong>${esc(t.technique)}</strong>
+            ${t.quote ? `<div class="cl-examples" style="margin-top:3px">"${esc(t.quote)}"</div>` : ""}
+            <p class="cl-card-text" style="margin-top:4px">${esc(t.explanation)}</p>
+          </div>`;
+        });
+        panels += `</div>`;
+      }
+
+      // Rhetorical strategies
+      if (ai.rhetoricalStrategies && ai.rhetoricalStrategies.length) {
+        panels += `<div class="cl-card"><div class="cl-card-title">Rhetorical Strategies</div>`;
+        ai.rhetoricalStrategies.forEach(rs => {
+          panels += `<div class="cl-finding"><strong>${esc(rs.strategy)}</strong><p class="cl-card-text">${esc(rs.explanation)}</p></div>`;
+        });
+        panels += `</div>`;
+      }
+
+      // Claim assessment
+      if (ai.claimAssessment && ai.claimAssessment.length) {
+        const aiClaimColors = {
+          verifiable_fact: "#4ade80", opinion: "#fb923c", value_judgment: "#c084fc",
+          prediction: "#60a5fa", unsupported_claim: "#f87171", well_supported_claim: "#4ade80",
+          misleading_claim: "#ef4444", definitional_claim: "#999"
+        };
+        panels += `<div class="cl-card"><div class="cl-card-title">Claim Assessment</div>`;
+        ai.claimAssessment.forEach(claim => {
+          const typeColor = aiClaimColors[claim.type] || "#999";
+          const typeLabel = (claim.type || "").replace(/_/g, " ");
+          const confPct = Math.round((claim.confidence || 0.5) * 100);
+          panels += `<div class="cl-claim">
+            <p class="cl-card-text">${esc(claim.claim)}</p>
+            <div style="display:flex;align-items:center;gap:6px;margin-top:4px;flex-wrap:wrap">
+              <span class="cl-badge" style="background:${typeColor}20;color:${typeColor}">${esc(typeLabel)}</span>
+              <span class="cl-count">${confPct}% conf.</span>
+            </div>
+            ${claim.reasoning ? `<p class="cl-card-text" style="margin-top:4px;font-size:11px;color:#999">${esc(claim.reasoning)}</p>` : ""}
+            ${claim.evidenceNeeded ? `<p class="cl-card-text" style="margin-top:2px;font-size:11px;color:#888"><em>To verify:</em> ${esc(claim.evidenceNeeded)}</p>` : ""}
+            ${claim.redFlags && claim.redFlags.length ? `<div class="cl-tags" style="margin-top:4px">${claim.redFlags.map(f => `<span class="cl-tag" style="border-color:#f8717140;color:#f87171">${esc(f)}</span>`).join("")}</div>` : ""}
+          </div>`;
+        });
+        panels += `</div>`;
+      }
+
+      // Missing context (detailed)
+      if (ai.missingContext) {
+        const mc = ai.missingContext;
+        const hasMissing = mc.summary || (mc.perspectives && mc.perspectives.length) || (mc.evidence && mc.evidence.length) || (mc.caveats && mc.caveats.length);
+        if (hasMissing) {
+          panels += `<div class="cl-card"><div class="cl-card-title">Missing Context</div>`;
+          if (mc.summary) panels += `<p class="cl-card-text" style="margin-bottom:8px">${esc(mc.summary)}</p>`;
+          if (mc.perspectives && mc.perspectives.length) {
+            panels += `<div class="cl-finding"><strong style="color:#c084fc">Missing Perspectives</strong>`;
+            mc.perspectives.forEach(p => { panels += `<p class="cl-card-text" style="margin-top:2px">• ${esc(p)}</p>`; });
+            panels += `</div>`;
+          }
+          if (mc.evidence && mc.evidence.length) {
+            panels += `<div class="cl-finding"><strong style="color:#60a5fa">Missing Evidence</strong>`;
+            mc.evidence.forEach(e => { panels += `<p class="cl-card-text" style="margin-top:2px">• ${esc(e)}</p>`; });
+            panels += `</div>`;
+          }
+          if (mc.caveats && mc.caveats.length) {
+            panels += `<div class="cl-finding"><strong style="color:#facc15">Omitted Caveats</strong>`;
+            mc.caveats.forEach(c => { panels += `<p class="cl-card-text" style="margin-top:2px">• ${esc(c)}</p>`; });
+            panels += `</div>`;
+          }
+          panels += `</div>`;
+        }
+      }
+
+      // AI suggested questions
+      if (ai.suggestedQuestions && ai.suggestedQuestions.length) {
+        panels += `<div class="cl-card"><div class="cl-card-title">Critical Questions</div>`;
+        ai.suggestedQuestions.forEach(q => { panels += `<div class="cl-question"><span class="cl-q-mark">?</span>${esc(q)}</div>`; });
+        panels += `</div>`;
+      }
+
+      panels += `</div>`; // end AI tab
     }
 
     // AI error notification
@@ -634,6 +912,11 @@
     if (score >= 50) return "#facc15";
     if (score >= 30) return "#fb923c";
     return "#f87171";
+  }
+
+  function capitalize(s) {
+    if (!s) return "";
+    return String(s).replace(/\b\w/g, c => c.toUpperCase()).replace(/_/g, " ");
   }
 
   function metricRow(label, value, color) {
@@ -722,14 +1005,12 @@
   // INIT
   // ═══════════════════════════════════════════
 
-  // Restore highlights when page loads
   if (document.readyState === "complete") {
     restoreHighlights();
   } else {
     window.addEventListener("load", restoreHighlights);
   }
 
-  // Listen for messages from popup
   chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
     if (msg.action === "getHighlightCount") {
       loadHighlights().then(h => sendResponse({ count: h.length }));
